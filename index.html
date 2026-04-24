@@ -779,16 +779,14 @@ header{display:flex;align-items:center;justify-content:space-between;margin-bott
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
         <div>
           <div class="cfg-toggle-title">Online</div>
-          <div class="cfg-toggle-sub">Meet, Zoom, Teams</div>
+          <div class="cfg-toggle-sub">No alto-falante, sem fone</div>
         </div>
       </button>
     </div>
     <div id="roomHint" class="cfg-hint hidden">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
       <div>
-        <div style="margin-bottom:8px"><strong>Para o modo online funcionar são necessárias duas coisas:</strong></div>
-        <div style="margin-bottom:6px"><strong>1.</strong> Ativar a <strong>identificação de vozes</strong> logo abaixo (com chave Deepgram). Sem isso, o navegador só transcreve o seu microfone — o que os outros falam é ignorado.</div>
-        <div><strong>2.</strong> Ao clicar em <strong>Gravar</strong>, escolher a <strong>aba</strong> da reunião (não a janela inteira) e <strong>marcar a opção "Compartilhar áudio"</strong> que aparece no canto.</div>
+        <strong>Para captar todo mundo:</strong> tire os fones de ouvido e deixe o áudio da reunião tocando no <strong>alto-falante</strong> do dispositivo. O microfone vai captar a sua voz e também o que os outros falarem. Procure um ambiente sem barulho.
       </div>
     </div>
   </div>
@@ -849,8 +847,6 @@ let state = {
   _audioBlob: null,
   _audioStream: null,
   _micStreamCached: null,  // mic persistido entre gravações (permissão única)
-  _displayStream: null,    // stream da aba no modo "online" (reiniciado a cada gravação)
-  _audioCtx: null,
   _dg: null,              // WebSocket Deepgram
   _dgKeepalive: null,
   _dgSpeakerMap: {},      // índice → nome ("Falante 1" etc.)
@@ -910,6 +906,12 @@ function saveConfig() {
 }
 
 function setAudioSource(src) {
+  // Se mudou de modo, invalida o cache do mic — a próxima gravação vai
+  // pedir um stream novo com a config correta (eco ligado/desligado).
+  if (state.audioSource !== src && state._micStreamCached) {
+    try { state._micStreamCached.getTracks().forEach(t => t.stop()); } catch {}
+    state._micStreamCached = null;
+  }
   state.audioSource = src;
   applyAudioSourceUI();
   saveConfig();
@@ -945,11 +947,22 @@ async function startAudioCapture() {
   let micStream = state._micStreamCached;
   const micAlive = micStream && micStream.getAudioTracks().some(t => t.readyState === "live");
   if (!micAlive) {
+    // No modo "Online" (alto-falante), DESLIGAMOS o cancelamento de eco e a
+    // supressão de ruído — caso contrário, o Chrome filtraria a voz dos outros
+    // participantes que vem do alto-falante tratando-a como "eco".
+    // No modo "Presencial", mantemos os dois ligados pra limpar o áudio.
+    const isRoom = state.audioSource === "room";
     micStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 44100 },
+      audio: {
+        echoCancellation: !isRoom,
+        noiseSuppression: !isRoom,
+        autoGainControl: !isRoom,
+        sampleRate: 44100,
+      },
       video: false,
     });
     state._micStreamCached = micStream;
+    state._micStreamMode = state.audioSource;
   } else {
     // Reabilita as tracks caso estivessem desabilitadas
     micStream.getAudioTracks().forEach(t => { t.enabled = true; });
@@ -958,34 +971,9 @@ async function startAudioCapture() {
 
   let finalStream = micStream;
 
-  // Modo online: mistura com áudio da aba
-  if (state.audioSource === "room") {
-    try {
-      const displayStream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: 1 },
-        audio: { echoCancellation: false, noiseSuppression: false, sampleRate: 44100 },
-      });
-      const tabAudioTracks = displayStream.getAudioTracks();
-      if (tabAudioTracks.length > 0) {
-        state._audioCtx = new AudioContext({ sampleRate: 44100 });
-        const dest = state._audioCtx.createMediaStreamDestination();
-        state._audioCtx.createMediaStreamSource(micStream).connect(dest);
-        state._audioCtx.createMediaStreamSource(displayStream).connect(dest);
-        finalStream = dest.stream;
-        state._displayStream = displayStream;
-        displayStream.getVideoTracks().forEach(t => t.stop());
-      } else {
-        displayStream.getTracks().forEach(t => t.stop());
-        showError(
-          'Nenhum áudio foi capturado da aba. Verifique se você (1) escolheu uma ' +
-          'ABA (não "Janela" nem "Tela inteira") e (2) marcou a caixinha ' +
-          '"Compartilhar áudio da aba". Por enquanto vou usar só o microfone.'
-        );
-      }
-    } catch (dispErr) {
-      // Usuário cancelou — continua só com mic
-    }
-  }
+  // No modo "Online" o usuário deixa a reunião tocando no alto-falante
+  // sem fone — o microfone capta a voz dele e também o áudio dos outros
+  // saindo pelo speaker. Sem precisar compartilhar aba ou pedir chave.
 
   // Grava se usuário quer salvar o áudio OU se diarização está ligada (precisa do stream)
   const needRecorder = state.saveAudio || dgEnabled();
@@ -1005,15 +993,6 @@ async function startAudioCapture() {
         state._audioBlob = new Blob(state._audioChunks, { type: mimeType });
       }
       // NÃO paramos o mic cacheado — evita novo pedido de permissão
-      // Apenas o display stream (modo online) e o audioCtx
-      if (state._displayStream) {
-        state._displayStream.getTracks().forEach(t => t.stop());
-        state._displayStream = null;
-      }
-      if (state._audioCtx) {
-        try { state._audioCtx.close(); } catch {}
-        state._audioCtx = null;
-      }
       state._audioStream = null;
     };
     state._mediaRecorder.start(500);  // chunks de 500 ms
@@ -1035,11 +1014,6 @@ function resumeAudioCapture() {
 function stopAudioCapture() {
   if (state._mediaRecorder && state._mediaRecorder.state !== "inactive") {
     try { state._mediaRecorder.stop(); } catch {}
-  }
-  // O display stream (modo online) precisa parar sempre
-  if (state._displayStream) {
-    state._displayStream.getTracks().forEach(t => t.stop());
-    state._displayStream = null;
   }
   // ATENÇÃO: NÃO paramos o _micStreamCached aqui — ele é mantido vivo entre
   // gravações para evitar um novo pedido de permissão do navegador.
@@ -1168,19 +1142,6 @@ async function startRec() {
 
   // Se resumindo uma pausa, usa state.pausedElapsed
   const isResume = state.paused;
-
-  // VALIDAÇÃO: modo online exige Deepgram.
-  // Sem Deepgram, a transcrição cai na Web Speech API do navegador, que só escuta
-  // o microfone padrão do sistema e ignora qualquer stream customizado — ou seja,
-  // o áudio dos outros participantes da reunião não seria transcrito.
-  if (!isResume && state.audioSource === "room" && !dgEnabled()) {
-    showError(
-      'Modo online precisa da identificação de vozes ativada (com chave Deepgram). ' +
-      'Sem isso, o navegador só transcreve o seu microfone. ' +
-      'Ative logo abaixo nas configurações ou mude para "Presencial".'
-    );
-    return;
-  }
 
   // Garante que ainda temos permissão e infra de áudio (captura o microfone / aba)
   try {
