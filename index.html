@@ -785,7 +785,11 @@ header{display:flex;align-items:center;justify-content:space-between;margin-bott
     </div>
     <div id="roomHint" class="cfg-hint hidden">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-      <div>Ao clicar em <strong>Gravar</strong>, o navegador vai pedir pra você escolher uma aba. Selecione a aba da reunião e <strong>marque "Compartilhar áudio"</strong>.</div>
+      <div>
+        <div style="margin-bottom:8px"><strong>Para o modo online funcionar são necessárias duas coisas:</strong></div>
+        <div style="margin-bottom:6px"><strong>1.</strong> Ativar a <strong>identificação de vozes</strong> logo abaixo (com chave Deepgram). Sem isso, o navegador só transcreve o seu microfone — o que os outros falam é ignorado.</div>
+        <div><strong>2.</strong> Ao clicar em <strong>Gravar</strong>, escolher a <strong>aba</strong> da reunião (não a janela inteira) e <strong>marcar a opção "Compartilhar áudio"</strong> que aparece no canto.</div>
+      </div>
     </div>
   </div>
 
@@ -972,7 +976,11 @@ async function startAudioCapture() {
         displayStream.getVideoTracks().forEach(t => t.stop());
       } else {
         displayStream.getTracks().forEach(t => t.stop());
-        showError('Você não marcou "Compartilhar áudio". Vou usar só o microfone.');
+        showError(
+          'Nenhum áudio foi capturado da aba. Verifique se você (1) escolheu uma ' +
+          'ABA (não "Janela" nem "Tela inteira") e (2) marcou a caixinha ' +
+          '"Compartilhar áudio da aba". Por enquanto vou usar só o microfone.'
+        );
       }
     } catch (dispErr) {
       // Usuário cancelou — continua só com mic
@@ -1160,6 +1168,19 @@ async function startRec() {
 
   // Se resumindo uma pausa, usa state.pausedElapsed
   const isResume = state.paused;
+
+  // VALIDAÇÃO: modo online exige Deepgram.
+  // Sem Deepgram, a transcrição cai na Web Speech API do navegador, que só escuta
+  // o microfone padrão do sistema e ignora qualquer stream customizado — ou seja,
+  // o áudio dos outros participantes da reunião não seria transcrito.
+  if (!isResume && state.audioSource === "room" && !dgEnabled()) {
+    showError(
+      'Modo online precisa da identificação de vozes ativada (com chave Deepgram). ' +
+      'Sem isso, o navegador só transcreve o seu microfone. ' +
+      'Ative logo abaixo nas configurações ou mude para "Presencial".'
+    );
+    return;
+  }
 
   // Garante que ainda temos permissão e infra de áudio (captura o microfone / aba)
   try {
